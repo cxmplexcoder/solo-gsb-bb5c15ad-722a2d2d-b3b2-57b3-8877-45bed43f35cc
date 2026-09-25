@@ -120,6 +120,25 @@ const EXAMPLE_ITINERARY_CONFLICT_TEXT = [
 // 第 2 个事件段“早饭 → 开会”被标为无路可达。
 const EXAMPLE_ITINERARY_UNREACH_ROUTES = "家,餐馆,15";
 
+// 有序事件最大统一间隔——有界示例：沿用页面可行示例的 6 行区间，
+// 按起床→洗漱→早饭→出门→开会 的顺序，各相邻段统一拉开的最大 g 为 30 分钟
+// （前 3 段恰好 30 分钟顶到上界，第 4 段实际 40 分钟、富余 10）。
+const EXAMPLE_MAXGAP_OK_ORDER = ["起床", "洗漱", "早饭", "出门", "开会"].join("\n");
+
+// 有序事件最大统一间隔——无上限示例：两组互不连通的事件区间，所选顺序跨两个组件，
+// 原区间对相邻所选事件的间隔没有任何有限上界，可整体任意拉开 ⇒ 显示“无上限”。
+const EXAMPLE_MAXGAP_UNBOUNDED_TEXT = [
+  "起床,洗漱,10,30",
+  "洗漱,早饭,15,45",
+  "上班,下班,480,600",
+].join("\n");
+const EXAMPLE_MAXGAP_UNBOUNDED_ORDER = ["起床", "上班"].join("\n");
+
+// 有序事件最大统一间隔——顺序冲突示例：区间要求甲比乙晚 10~60 分钟，
+// 所选顺序却要求乙先于甲；连 g=0（只要求先后不反向）都形成闭合矛盾链。
+const EXAMPLE_MAXGAP_CONFLICT_TEXT = "甲,乙,10,60";
+const EXAMPLE_MAXGAP_CONFLICT_ORDER = ["乙", "甲"].join("\n");
+
 const $ = (id) => document.getElementById(id);
 const resultEl = $("result");
 const redundancyEl = $("redundancy-result");
@@ -142,6 +161,8 @@ const itineraryPlacesEl = $("itinerary-places");
 const itineraryRoutesEl = $("itinerary-routes");
 const itineraryOrderEl = $("itinerary-order");
 const itineraryEl = $("itinerary-result");
+const maxGapOrderEl = $("maxgap-order");
+const maxGapEl = $("maxgap-result");
 
 function esc(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({
@@ -719,6 +740,7 @@ $("btn-clear").addEventListener("click", () => {
   withdrawEl.innerHTML = "";
   aliasEl.innerHTML = "";
   itineraryEl.innerHTML = "";
+  maxGapEl.innerHTML = "";
   refreshLineOptions();
   inputEl.focus();
 });
@@ -732,6 +754,7 @@ inputEl.addEventListener("input", () => {
   withdrawEl.innerHTML = "";    // 文本已变，旧的最少撤回结论作废
   aliasEl.innerHTML = "";       // 区间已变，旧的别名归并结论作废
   itineraryEl.innerHTML = "";   // 区间已变，旧的行程可达性结论作废
+  maxGapEl.innerHTML = "";      // 区间已变，旧的最大统一间隔结论作废
 });
 refreshLineOptions();
 
@@ -1715,4 +1738,243 @@ $("btn-itinerary-clear").addEventListener("click", () => {
 // 地点 / 路段 / 行程顺序任一变化，旧的行程结论立即作废
 [itineraryPlacesEl, itineraryRoutesEl, itineraryOrderEl].forEach((el) => {
   el.addEventListener("input", () => { itineraryEl.innerHTML = ""; });
+});
+
+// ---------- 有序事件最大统一间隔 ----------
+
+// 顺序下界步骤的标签：复用 tag 配色（新增 .tag.order 样式）
+function maxGapStepTagHtml(s) {
+  if (s.kind === "order") {
+    return `<span class="tag order">所选顺序第 ${s.segment_index} 段 · 下界 ${s.bound}</span>`;
+  }
+  return `<span class="tag ${s.kind}">第 ${s.line} 行 · ${esc(s.kind_label)} ${esc(stepBoundText(s))}</span>`;
+}
+
+// 顺序冲突矛盾链：在通用矛盾链图基础上，顺序下界环节补充事件段说明
+function maxGapConflictChainHtml(c) {
+  const steps = c.steps;
+  const parts = [];
+  steps.forEach((s, i) => {
+    if (i === 0) parts.push(`<div class="chain-node">${esc(s.from)}</div>`);
+    const extra = s.kind === "order"
+      ? `<span class="route-meta">事件段 ${s.segment_index}：${esc(s.from_event)} → ${esc(s.to_event)}</span>`
+      : "";
+    parts.push(`
+      <div class="chain-edge">
+        ${maxGapStepTagHtml(s)}
+        <span class="rel">${esc(s.relation)}</span>
+        ${extra}
+        <span class="chain-arrow">→</span>
+      </div>
+      <div class="chain-node">${esc(s.to)}</div>`);
+  });
+  parts.push(`
+    <div class="chain-edge"><span class="muted">闭合回到</span><span class="chain-arrow">⟲</span></div>
+    <div class="chain-node">${esc(c.closes_to)}</div>`);
+  return `<div class="chain">${parts.join("")}</div>`;
+}
+
+// 相邻所选事件段总览：段号、事件对、要求间隔 g、时间线实际间隔、富余、是否顶到上界
+function maxGapGapsTableHtml(gaps, unbounded) {
+  const rows = gaps.map((s) => `
+    <tr>
+      <td class="num">第 ${s.index} 段</td>
+      <td>${esc(s.from_event)} → ${esc(s.to_event)}</td>
+      <td class="num">${unbounded ? "0（无上限，按 g=0 展示）" : s.required_gap}</td>
+      <td class="num">${s.actual_gap}</td>
+      <td class="num">+${s.slack}</td>
+      <td>${s.tight ? '<span class="ok-text">恰好达到 g</span>' : '<span class="muted">有富余</span>'}</td>
+    </tr>`).join("");
+  return `
+    <table>
+      <thead><tr>
+        <th class="num">事件段</th><th>相邻所选事件（按顺序）</th>
+        <th class="num">要求至少相隔</th><th class="num">时间线实际间隔</th>
+        <th class="num">富余</th><th>是否达到上界</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+// 完整可行时间线（含全部区间事件；所选事件高亮）
+function maxGapTimelineTableHtml(timeline) {
+  const rows = timeline.map((t) => `
+    <tr${t.selected ? ' class="maxgap-selected-row"' : ""}>
+      <td>${esc(t.event)} ${t.selected ? '<span class="tag order">所选事件</span>' : ""}</td>
+      <td class="num">${t.minute}</td>
+    </tr>`).join("");
+  return `
+    <table>
+      <thead><tr><th>事件</th><th class="num">分钟（最早事件 = 0）</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function renderMaxGapOk(data) {
+  const unbounded = data.unbounded;
+  const gText = unbounded ? "无上限" : `${data.max_gap} 分钟`;
+  const bannerCls = unbounded ? "ok" : "ok";
+  const ordered = data.ordered_events.map((o) =>
+    `<span class="route-node">${esc(o.event)}<span class="route-meta">（第 ${o.minute} 分钟）</span></span>`
+  ).join('<span class="route-edge"> → </span>');
+
+  const points = data.ordered_selection.map((o) => `
+    <div class="tl-point">
+      <div class="tl-dot"></div>
+      <div class="tl-name">${esc(o.event)}</div>
+      <div class="tl-time">第 ${o.minute} 分钟</div>
+    </div>`).join("");
+
+  const maxMinute = Math.max(...data.timeline.map((t) => t.minute));
+
+  const checkRows = data.differences.map((d) => {
+    const fit = d.low <= d.actual && d.actual <= d.high;
+    return `<tr>
+      <td class="num">${d.line}</td>
+      <td>${esc(d.a)} → ${esc(d.b)}</td>
+      <td class="num">[${d.low}, ${d.high}]</td>
+      <td class="num">${d.actual}</td>
+      <td>${fit ? '<span class="ok-text">满足</span>' : '<span style="color:var(--err)">不满足</span>'}</td>
+    </tr>`;
+  }).join("");
+
+  maxGapEl.innerHTML = `
+    <div class="banner ${bannerCls}">
+      <h2>✓ 最大统一间隔：g = ${unbounded ? "无上限" : data.max_gap}${unbounded ? "" : " 分钟"}</h2>
+      <p>${esc(data.message)}</p>
+    </div>
+    <div class="card">
+      <h3>所选顺序与各事件时刻</h3>
+      <div class="route-chain">${ordered}</div>
+      <div class="timeline-track">
+        <div class="tl-line"></div>
+        <div class="tl-grid">${points}</div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>${data.segment_count} 对相邻所选事件的间隔核对</h3>
+      ${maxGapGapsTableHtml(data.gaps, unbounded)}
+      <p class="muted">判定口径：在全部 ${data.line_count} 条原区间同时成立的前提下，每对相邻所选事件
+      “后一事件 − 前一事件 ≥ g”；最大的统一 g 即各相邻段可共同达到的上界，至少有一段实际间隔恰好等于 g。
+      ${unbounded ? "g 无上限：g=0 时没有任何一条顺序约束落在有向环上，所选事件可整体任意拉开。" : ""}</p>
+    </div>
+    <div class="card">
+      <h3>一条${unbounded ? " g=0 时的" : "达到该间隔的"}完整可行时间线（共 ${data.event_count} 个事件）</h3>
+      ${maxGapTimelineTableHtml(data.timeline)}
+      <p class="muted">时间跨度 0 ~ ${maxMinute} 分钟；所选事件高亮显示，其余为区间中出现但未被选中的事件。
+      所有事件可整体平移，差值不变。</p>
+    </div>
+    <div class="card">
+      <h3>原区间逐条核对</h3>
+      <table>
+        <thead><tr>
+          <th class="num">行号</th><th>事件对</th><th class="num">要求区间</th>
+          <th class="num">本时间线差值</th><th>结果</th>
+        </tr></thead>
+        <tbody>${checkRows}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderMaxGapOrderConflict(data) {
+  const c = data.conflict;
+  const ordered = data.ordered_events.map((o) => esc(o)).join(" → ");
+  const detailRows = c.steps.map((s) => {
+    let ref;
+    let extra = "";
+    if (s.kind === "order") {
+      ref = `所选顺序第 ${s.segment_index} 段`;
+      extra = `<td class="muted">${esc(s.from_event)} → ${esc(s.to_event)}（要求 ${esc(s.to_event)} 不早于 ${esc(s.from_event)}）</td>`;
+    } else {
+      ref = `第 ${s.line} 行`;
+      extra = `<td class="muted">${esc(s.relation)}</td>`;
+    }
+    return `<tr>
+      <td class="num">${ref}</td>
+      <td>${esc(s.from)} → ${esc(s.to)}</td>
+      <td><span class="tag ${s.kind}">${esc(s.kind_label)}</span></td>
+      <td class="num">${esc(stepBoundText(s))}</td>
+      ${extra}
+    </tr>`;
+  }).join("");
+
+  maxGapEl.innerHTML = `
+    <div class="banner conflict">
+      <h2>✗ 顺序冲突：所选顺序连 g=0 都无法满足</h2>
+      <p>${esc(data.message)}</p>
+      <p style="margin-top:6px">所选顺序：<strong>${ordered}</strong>；闭合矛盾链上界值之和为
+      <strong>${c.weight_sum} &lt; 0</strong>，意味着至少有一对相邻事件在原区间下必须与所给顺序相反。</p>
+    </div>
+    <div class="card">
+      <h3>闭合矛盾链（原区间行 × 顺序下界）</h3>
+      ${maxGapConflictChainHtml(c)}
+    </div>
+    <div class="card">
+      <h3>矛盾依据明细</h3>
+      <table>
+        <thead><tr>
+          <th class="num">来源（区间行 / 顺序段）</th><th>图中方向</th><th>使用的界</th>
+          <th class="num">界值（分钟）</th><th>含义 / 事件段</th>
+        </tr></thead>
+        <tbody>${detailRows}</tbody>
+      </table>
+      <p class="muted">“顺序下界”取 g=0（即只要求后一事件不早于前一事件）；“上界/下界”取自上方
+      时间差区间文本的原始行号。请核对所选事件的先后顺序是否与某条区间叙述相反。</p>
+    </div>`;
+}
+
+async function queryMaxGap() {
+  maxGapEl.innerHTML = `<div class="card muted">联立并求最大统一间隔中…</div>`;
+  try {
+    const resp = await fetch("/api/max-gap", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: inputEl.value, order: maxGapOrderEl.value }),
+    });
+    const data = await resp.json();
+    if (data.status === "ok") {
+      renderMaxGapOk(data);
+    } else if (data.status === "order_conflict") {
+      renderMaxGapOrderConflict(data);
+    } else if (data.status === "conflict") {
+      // 原区间自身矛盾：沿用现有闭合矛盾链
+      renderConflict(data, maxGapEl);
+      maxGapEl.insertAdjacentHTML("afterbegin",
+        `<div class="banner err"><h2>原区间自身矛盾</h2>
+         <p>上方时间差区间在加入任何顺序约束前已互相矛盾，沿用现有闭合矛盾链；请先消除区间冲突，再查询最大统一间隔。</p></div>`);
+    } else {
+      renderErrors(data.errors || [{ line: null, message: "未知错误。" }], maxGapEl);
+    }
+  } catch (err) {
+    maxGapEl.innerHTML = `
+      <div class="banner err"><h2>请求失败</h2><p>${esc(err.message)}</p></div>`;
+  }
+}
+
+$("btn-maxgap").addEventListener("click", queryMaxGap);
+$("btn-maxgap-example-ok").addEventListener("click", () => {
+  inputEl.value = EXAMPLE_OK;
+  maxGapOrderEl.value = EXAMPLE_MAXGAP_OK_ORDER;
+  refreshLineOptions();
+  queryMaxGap();
+});
+$("btn-maxgap-example-unbounded").addEventListener("click", () => {
+  inputEl.value = EXAMPLE_MAXGAP_UNBOUNDED_TEXT;
+  maxGapOrderEl.value = EXAMPLE_MAXGAP_UNBOUNDED_ORDER;
+  refreshLineOptions();
+  queryMaxGap();
+});
+$("btn-maxgap-example-conflict").addEventListener("click", () => {
+  inputEl.value = EXAMPLE_MAXGAP_CONFLICT_TEXT;
+  maxGapOrderEl.value = EXAMPLE_MAXGAP_CONFLICT_ORDER;
+  refreshLineOptions();
+  queryMaxGap();
+});
+$("btn-maxgap-clear").addEventListener("click", () => {
+  maxGapOrderEl.value = "";
+  maxGapEl.innerHTML = "";
+  maxGapOrderEl.focus();
+});
+maxGapOrderEl.addEventListener("input", () => {
+  maxGapEl.innerHTML = "";  // 所选顺序已变，旧的结论作废
 });

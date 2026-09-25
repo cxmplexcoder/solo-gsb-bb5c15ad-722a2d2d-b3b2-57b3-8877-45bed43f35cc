@@ -71,6 +71,18 @@ _derive_bound 求 t(乙) − t(甲) 的最紧下界/上界（推不出的端点�
 跑同一套 Bellman-Ford：负环还原的闭合矛盾链同时含原始区间行号与通行下界环节
 （标注事件段序号、地点对及最短路线）；可行时平移到最早事件为第 0 分钟，给出一条满足
 全部区间与通行下界的时间线，并逐段给出最短路线、所需分钟、实际间隔与富余。
+
+有序事件最大统一间隔（solve_max_gap）：区间文本沿用首页事件区间，另有按希望保持的
+先后顺序逐行输入的事件名（每行一个、至少两个、互不重复，且都已在区间中出现）。对每对
+相邻所选事件加“t(E_{i+1}) − t(E_i) ≥ g”的顺序下界边（E_{i+1} -> E_i，权 -g），与原区间
+复用同一套差分约束 Bellman-Ford 判定固定 g 是否可行。先在 g=0 联立：原区间语法错误
+逐行返回、原区间自身矛盾直接返回现有闭合矛盾链；g=0 仍有负环则判“顺序冲突”，负环
+还原时顺序边映射为“第 N 段顺序下界”（标注相邻事件段）。g=0 可行时在 g=0 增广图上做
+SCC：任一条顺序边的两端在同一强连通分量（即该边落在某条有向环上）等价于 g 存在有限
+上限（环对 g 的总要求不超过环上常数权之和）；所有顺序边都不在任何有向环上时 g 无上限，
+返回“无上限”并给出 g=0 的可行时间线。有限时按 1,2,4,… 指数探测找到首个不可行值，再在
+最后可行值与首个不可行值之间二分，得到最大非负整数 g；返回 g 与一条达到该间隔、满足
+全部原区间的完整可行时间线（最早事件为第 0 分钟）及各相邻所选事件段的实际间隔与富余。
 """
 
 from __future__ import annotations
@@ -2008,4 +2020,326 @@ def check_itinerary(text: str, places_text: str, routes_text: str, itinerary_tex
         "ordered_itinerary": ordered,
         "differences": differences,
         **counts,
+    }
+
+
+# ---------- 有序事件最大统一间隔 ----------
+
+def parse_event_order(text: str) -> tuple[list[tuple[int, str]], list[dict]]:
+    """按希望保持的先后顺序解析事件名：每行一个事件。
+
+    与行程顺序解析同款口径：兼容“事件,”之类误填的两字段写法；空行跳过但行号保留
+    为顺序文本的原始行号；同一事件重复出现为错误（返回值保留每行原始行号，
+    供后续“是否已在区间中出现”的校验沿用）。
+    """
+    errors: list[dict] = []
+    events: list[tuple[int, str]] = []
+
+    if not text or not text.strip():
+        return events, [{"line": None, "message": "有序事件输入为空：请按希望保持的先后顺序逐行填写事件名（每行一个事件，至少两个、互不重复）。"}]
+
+    seen: dict[str, int] = {}
+    for line_no, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line:
+            continue  # 空行不计入校验，但行号保留为顺序文本的原始行号
+
+        # 兼容误写成“事件,”（或“事件，”）的两字段形式：取首个非空字段
+        parts = [p.strip() for p in line.replace("，", ",").split(",")]
+        if len(parts) > 2 or (len(parts) == 2 and parts[1] != ""):
+            errors.append({
+                "line": line_no,
+                "message": f"有序事件第{line_no}行：每行只填写一个事件名，实际得到 {len(parts)} 个字段（“{line}”）。",
+            })
+            continue
+        name = parts[0]
+        if not name:
+            errors.append({"line": line_no, "message": f"有序事件第{line_no}行：事件名为空。"})
+            continue
+        if name in seen:
+            errors.append({
+                "line": line_no,
+                "message": (
+                    f"有序事件第{line_no}行：事件“{name}”重复出现"
+                    f"（已在第{seen[name]}行出现）；希望保持先后顺序的事件必须互不相同。"
+                ),
+            })
+            continue
+        seen[name] = line_no
+        events.append((line_no, name))
+
+    return events, errors
+
+
+def _order_step_builder(g: int):
+    """构造认识区间边与顺序下界边的矛盾链步骤构建器；顺序边对应“后一事件 − 前一事件 ≥ g”。"""
+    def build(names: list[str], e: Edge) -> dict:
+        if e.kind == "order":
+            # Edge(u=后一事件, v=前一事件, 权 -g, bound=g, label=事件段序号)
+            seg = int(e.label)
+            return {
+                "from": _display_name(names[e.u]),
+                "to": _display_name(names[e.v]),
+                "weight": e.w,
+                "line": None,  # 顺序约束不来自区间文本，行号显式置空
+                "kind": "order",
+                "kind_label": "顺序下界",
+                "bound": e.bound,
+                "source": "order",
+                "relation": f"{names[e.u]}−{names[e.v]} ≥ {e.bound}（所选顺序第 {seg} 段：{names[e.v]} → {names[e.u]}）",
+                "segment_index": seg,
+                "from_event": names[e.v],
+                "to_event": names[e.u],
+                "required_gap": g,
+            }
+        return _edge_step(names, e)
+    return build
+
+
+def _any_order_edge_in_cycle(n: int, edges: list[Edge], order_edges: list[Edge]) -> bool:
+    """g=0 增广图上是否至少有一条顺序边落在某条有向环上（两端属于同一强连通分量）。
+
+    用迭代版 Kosaraju 求强连通分量（避免 DFS 递归深度依赖）；区间边与顺序边都参与构图。
+    """
+    adj: list[list[int]] = [[] for _ in range(n)]
+    radj: list[list[int]] = [[] for _ in range(n)]
+    for e in edges:
+        adj[e.u].append(e.v)
+        radj[e.v].append(e.u)
+    for e in order_edges:
+        adj[e.u].append(e.v)
+        radj[e.v].append(e.u)
+
+    # 第一遍：在原图上按 DFS 完成顺序记录顶点
+    visited = [False] * n
+    finish: list[int] = []
+    for start in range(n):
+        if visited[start]:
+            continue
+        visited[start] = True
+        stack: list[tuple[int, int]] = [(start, 0)]
+        while stack:
+            u, i = stack[-1]
+            if i < len(adj[u]):
+                v = adj[u][i]
+                stack[-1] = (u, i + 1)
+                if not visited[v]:
+                    visited[v] = True
+                    stack.append((v, 0))
+            else:
+                finish.append(u)
+                stack.pop()
+
+    # 第二遍：在反图上按完成顺序逆序染色
+    comp = [-1] * n
+    cid = 0
+    for start in reversed(finish):
+        if comp[start] != -1:
+            continue
+        comp[start] = cid
+        stack = [start]
+        while stack:
+            u = stack.pop()
+            for v in radj[u]:
+                if comp[v] == -1:
+                    comp[v] = cid
+                    stack.append(v)
+        cid += 1
+
+    return any(comp[e.u] == comp[e.v] for e in order_edges)
+
+
+def solve_max_gap(text: str, order_text: str) -> dict:
+    """有序事件最大统一间隔：求使每对相邻所选事件至少相隔 g 分钟且全部原区间同时成立的
+    最大非负整数 g，并返回一条达到该间隔的完整可行时间线。
+
+    流程：
+    - 区间文本沿用 parse_text 逐行校验，原区间语法错误时直接返回逐行错误；
+    - 顺序文本逐行一个事件名，要求至少两个、互不重复，且每个事件都已在区间中出现；
+    - 原区间自身矛盾时直接返回现有闭合矛盾链（尚未加入顺序约束，沿用现有结果）；
+    - 对每对相邻所选事件加顺序下界边（后一事件 -> 前一事件，权 -g）：g=0 联立仍有负环
+      时判“顺序冲突”，返回含区间行与顺序下界环节的闭合矛盾链（即使 g=0 也无法满足）；
+    - g=0 可行时在 g=0 增广图上做 SCC：任一条顺序边落在有向环上则 g 有有限上限（环上
+      常数权之和给出 g 的上界），否则 g 无上限，返回“无上限”并给出 g=0 的可行时间线；
+    - 有限时按 1,2,4,… 指数探测到首个不可行值，再二分求最大可行整数 g；最后用 g 对应
+      的 Bellman-Ford 距离（全部初始化为 0 的逐点最早可行解）平移出完整可行时间线，
+      并逐段给出实际间隔与富余。
+    """
+    rows, errors = parse_text(text)
+    order_pairs, order_errors = parse_event_order(order_text)
+    errors = errors + order_errors
+
+    # 至少两个事件；重复事件已由解析器逐行报错，这里只对数量做校验
+    non_empty_order = len(order_pairs)
+    if non_empty_order < 2 and not order_errors:
+        errors.append({
+            "line": None,
+            "message": (
+                f"有序事件只有 {non_empty_order} 个：请按希望保持的先后顺序填写至少两个"
+                "互不重复、且已在上方事件区间中出现的事件名（每行一个）。"
+            ),
+        })
+
+    # 所选事件必须都已在区间中出现（与先后查询同款口径；区间行非法时跳过此项以免噪声）
+    if rows and order_pairs:
+        common_names = {r.a for r in rows} | {r.b for r in rows}
+        for line_no, name in order_pairs:
+            if name not in common_names:
+                errors.append({
+                    "line": line_no,
+                    "message": (
+                        f"有序事件第{line_no}行的事件“{name}”未出现在上方事件区间中："
+                        "参与统一间隔查询的事件必须是区间中已经出现的事件。"
+                    ),
+                })
+    if errors:
+        return {"status": "error", "errors": errors}
+
+    # 原区间先独立联立：区间自身矛盾时直接沿用现有闭合矛盾链（尚未加入顺序约束）
+    base = solve_rows(rows)
+    if base["status"] != "ok":
+        return base
+
+    names: list[str] = base["names"]
+    index: dict[str, int] = base["index"]
+    interval_edges: list[Edge] = base["edges"]
+    events = [name for _, name in order_pairs]
+    order_idx = [index[name] for name in events]
+    seg_count = len(events) - 1
+
+    def order_edges_at(g: int) -> list[Edge]:
+        return [
+            Edge(order_idx[i + 1], order_idx[i], -g, -1, "order", g, "order", str(i + 1))
+            for i in range(seg_count)
+        ]
+
+    g0_edges = interval_edges + order_edges_at(0)
+
+    # g=0 联立：仍有负环 ⇒ 所选顺序连“先后不反向”都做不到，判顺序冲突
+    dist0, pred0, last_relaxed0 = _relax_all(names, g0_edges)
+    if last_relaxed0 is not None:
+        conflict = _conflict_result(
+            names, pred0, last_relaxed0, len(names), step_builder=_order_step_builder(0)
+        )["conflict"]
+        return {
+            "status": "order_conflict",
+            "message": (
+                "上方事件区间本身可行，但按所给先后顺序加入“相邻事件至少相隔 0 分钟”"
+                "（即只要求先后不反向）后仍出现闭合矛盾链：所选顺序与原区间互不相容，"
+                "即使 g=0 也无法满足，请核对事件顺序是否与区间叙述相反。"
+            ),
+            "ordered_events": events,
+            "segment_count": seg_count,
+            "conflict": conflict,
+            "event_count": len(names),
+            "line_count": len(rows),
+        }
+
+    # 有界性：g=0 增广图上任一顺序边落在有向环（两端同属一个强连通分量）⇔ g 有有限上限。
+    # 环对 g 的总要求（环上顺序边条数 × g）不能超过环上常数权之和，否则该环成负环。
+    bounded = _any_order_edge_in_cycle(len(names), interval_edges, order_edges_at(0))
+
+    def feasible(g: int) -> bool:
+        _, _, last_relaxed = _relax_all(names, interval_edges + order_edges_at(g))
+        return last_relaxed is None
+
+    if not bounded:
+        # 所有顺序边都不在任何有向环上：原区间对相邻所选事件的先后间隔给不出有限上界
+        max_gap: int | None = None
+        dist = dist0
+    else:
+        # 指数探测：1,2,4,… 直到首个不可行值；再在 [lo, hi) 内二分最大可行整数
+        lo, hi = 0, 1
+        while feasible(hi):
+            lo, hi = hi, hi * 2
+        while lo + 1 < hi:
+            mid = (lo + hi) // 2
+            if feasible(mid):
+                lo = mid
+            else:
+                hi = mid
+        max_gap = lo
+        if max_gap == 0:
+            dist = dist0
+        else:
+            dist, _, _ = _relax_all(names, interval_edges + order_edges_at(max_gap))
+
+    # 全部初始化为 0 的 Bellman-Ford 距离是逐点最早可行解，整体平移令最早事件为第 0 分钟
+    base_minute = min(dist)
+    minutes = {names[i]: dist[i] - base_minute for i in range(len(names))}
+
+    selected_set = set(events)
+    timeline = [
+        {"event": name, "minute": minutes[name], "selected": name in selected_set}
+        for name in names
+    ]
+    timeline.sort(key=lambda x: (x["minute"], x["event"]))
+
+    ordered_selection = [
+        {"position": i + 1, "event": name, "minute": minutes[name]}
+        for i, name in enumerate(events)
+    ]
+
+    gaps = []
+    for i in range(seg_count):
+        earlier, later = events[i], events[i + 1]
+        actual = minutes[later] - minutes[earlier]
+        required = max_gap if max_gap is not None else 0
+        gaps.append({
+            "index": i + 1,
+            "from_event": earlier,
+            "to_event": later,
+            "required_gap": required,
+            "actual_gap": actual,
+            "slack": actual - required,
+            "tight": max_gap is not None and actual == max_gap,
+        })
+
+    differences = [
+        {
+            "line": r.line,
+            "a": r.a,
+            "b": r.b,
+            "low": r.low,
+            "high": r.high,
+            "actual": dist[index[r.b]] - dist[index[r.a]],
+        }
+        for r in rows
+    ]
+
+    if max_gap is None:
+        message = (
+            "g 无上限：原区间对所选相邻事件的先后间隔没有任何有限上界"
+            "（g=0 时没有任何一条顺序约束落在有向环上），任意大的 g 都能通过整体拉开"
+            "所选事件而保持全部原区间成立；以下按要求给出 g=0 时的一条可行时间线"
+            "（最早事件为第 0 分钟）。"
+        )
+    elif max_gap == 0:
+        message = (
+            f"在全部 {len(rows)} 条原区间同时成立的前提下，{seg_count} 对相邻所选事件的"
+            "最大统一间隔为 g = 0 分钟：所选顺序可以做到先后不反向，但原区间把至少一对"
+            "相邻事件钉为同一时刻，无法再拉开任何正整数分钟；以下时间线满足全部原区间。"
+        )
+    else:
+        tight_count = sum(1 for s in gaps if s["tight"])
+        message = (
+            f"在全部 {len(rows)} 条原区间同时成立的前提下，{seg_count} 对相邻所选事件每对"
+            f"至少相隔的最大统一间隔为 g = {max_gap} 分钟（其中 {tight_count} 对恰好相隔 "
+            f"{max_gap} 分钟达到该上界）；以下时间线达到该间隔且满足全部原区间，"
+            "时刻以最早事件为第 0 分钟。"
+        )
+
+    return {
+        "status": "ok",
+        "message": message,
+        "ordered_events": events,
+        "segment_count": seg_count,
+        "unbounded": max_gap is None,
+        "max_gap": max_gap,
+        "timeline": timeline,
+        "ordered_selection": ordered_selection,
+        "gaps": gaps,
+        "differences": differences,
+        "event_count": len(names),
+        "line_count": len(rows),
     }

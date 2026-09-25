@@ -1,7 +1,8 @@
 """FastAPI 入口：提供静态页面与 /api/solve 联立求解、/api/redundancy 约束冗余核对、
 /api/compare 两版比较、/api/repair 冲突单行修订建议、/api/anchor 绝对时间锚定、
 /api/precedence 互斥说法下的先后查询、/api/withdrawals 最少撤回、
-/api/aliases 事件别名归并核对、/api/itinerary 行程可达性核对接口。"""
+/api/aliases 事件别名归并核对、/api/itinerary 行程可达性核对、
+/api/max-gap 有序事件最大统一间隔查询接口。"""
 
 from __future__ import annotations
 
@@ -18,11 +19,12 @@ from .solver import (
     solve,
     solve_aliases,
     solve_anchored,
+    solve_max_gap,
     solve_precedence,
     suggest_repairs,
 )
 
-app = FastAPI(title="口述史事件时间线核对", version="1.8.0")
+app = FastAPI(title="口述史事件时间线核对", version="1.9.0")
 
 
 class SolveRequest(BaseModel):
@@ -61,6 +63,11 @@ class ItineraryRequest(BaseModel):
     places: str = ""
     routes: str = ""
     itinerary: str = ""
+
+
+class MaxGapRequest(BaseModel):
+    text: str = ""
+    order: str = ""
 
 
 @app.get("/api/health")
@@ -126,6 +133,16 @@ def api_itinerary(req: ItineraryRequest) -> dict:
     # 判断整段行程是否可行；无路可达时指出对应事件段，冲突时给出含原区间行号、事件段及
     # 其最短路线的矛盾依据，可行时给出各段最短路线、所需分钟与一条满足全部约束的时间线
     return check_itinerary(req.text or "", req.places or "", req.routes or "", req.itinerary or "")
+
+
+@app.post("/api/max-gap")
+def api_max_gap(req: MaxGapRequest) -> dict:
+    # 有序事件最大统一间隔：沿用首页事件区间，另逐行输入按希望保持的先后顺序排列的
+    # 事件名（每行一个、至少两个、互不重复且都已在区间中出现）；求使每对相邻所选事件
+    # 至少相隔 g 分钟且全部原区间同时成立的最大非负整数 g。原区间语法错误或自身矛盾
+    # 时沿用现有错误或闭合矛盾链；所选顺序连 g=0 都无法满足时明确提示顺序冲突；
+    # g 没有有限上限时返回“无上限”并给出 g=0 的可行时间线。
+    return solve_max_gap(req.text or "", req.order or "")
 
 
 @app.get("/")

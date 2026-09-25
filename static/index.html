@@ -34,6 +34,11 @@
         后端对每对相邻事件求地点网络<strong>最短通行时间</strong>（同地点零分钟），把通行下界与本页时间差区间联立；
         无路可达时指出对应事件段，时间冲突时给出含<strong>原区间行号、事件段及其最短路线</strong>的矛盾依据，
         可行时列出各段最短路线、所需分钟与一条满足全部约束的时间线。
+        若想知道“按指定先后顺序，相邻事件最多能统一拉开多少分钟”，还可在区间旁按<strong>希望保持的先后顺序</strong>
+        逐行填写<strong>至少两个互不重复、已在区间中出现</strong>的事件名做<strong>有序事件最大统一间隔</strong>查询：
+        后端求使每对相邻所选事件至少相隔 <strong>g</strong> 分钟且全部原区间同时成立的<strong>最大非负整数 g</strong>，
+        返回 g 与一条<strong>达到该间隔的完整可行时间线</strong>；原区间可行但所选顺序连 g=0 都无法满足时明确提示<strong>顺序冲突</strong>
+        （给出含顺序下界的闭合矛盾链）；若 g 没有有限上限则显示<strong>“无上限”</strong>并给出 g=0 的可行时间线。
       </p>
     </header>
 
@@ -232,6 +237,30 @@
     </section>
 
     <section id="withdraw-result" aria-live="polite"></section>
+
+    <section class="input-area">
+      <label for="maxgap-order"><strong>有序事件最大统一间隔</strong></label>
+      <p class="muted" style="margin-top:0">
+        直接沿用上方“事件区间”文本；在此框<strong>按希望保持的先后顺序每行填写一个事件名</strong>
+        （至少两个、互不重复，且都已在区间中出现）。后端对每对相邻所选事件加入
+        “后一事件 − 前一事件 ≥ <strong>g</strong>”的下界与全部原区间联立，求<strong>最大的非负整数 g</strong>，
+        使每对相邻所选事件至少相隔 g 分钟且原区间全部成立，并给出一条<strong>达到该间隔的完整可行时间线</strong>
+        （最早事件为第 0 分钟，逐段列出实际间隔与富余）。所选顺序<strong>连 g=0 都无法满足</strong>时
+        明确提示<strong>顺序冲突</strong>并给出含顺序下界的闭合矛盾链；g <strong>没有有限上限</strong>时显示<strong>“无上限”</strong>，
+        并给出 g=0 的可行时间线。原区间语法错误或自身矛盾时沿用现有错误或闭合矛盾链。
+      </p>
+      <textarea id="maxgap-order" rows="6" spellcheck="false"
+        placeholder="起床&#10;洗漱&#10;早饭&#10;出门&#10;开会"></textarea>
+      <div class="button-row">
+        <button id="btn-maxgap" class="primary">求最大统一间隔</button>
+        <button id="btn-maxgap-example-ok">填入有界示例</button>
+        <button id="btn-maxgap-example-unbounded">填入无上限示例</button>
+        <button id="btn-maxgap-example-conflict">填入顺序冲突示例</button>
+        <button id="btn-maxgap-clear" class="ghost">清空顺序</button>
+      </div>
+    </section>
+
+    <section id="maxgap-result" aria-live="polite"></section>
 
     <section id="result" aria-live="polite"></section>
   </main>
