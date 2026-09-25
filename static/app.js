@@ -120,6 +120,26 @@ const EXAMPLE_ITINERARY_CONFLICT_TEXT = [
 // 第 2 个事件段“早饭 → 开会”被标为无路可达。
 const EXAMPLE_ITINERARY_UNREACH_ROUTES = "家,餐馆,15";
 
+// 有序事件最大统一间隔——有界示例：配合可行示例区间，顺序 起床→早饭→开会 的最大统一间隔
+// 为 75 分钟（起床→早饭 受第 1、2 行链式上界 30+45=75 分钟限制；再增大 1 分钟即不可行）。
+const EXAMPLE_MAXGAP_OK_ORDER = ["起床", "早饭", "开会"].join("\n");
+
+// 无上限示例：三段互不相干的区间链，所选顺序 起床→出门→午休 的相邻对都跨事件组件，
+// 原区间给不出任何间隔上界 ⇒ g 无上限，展示 g=0（保持先后顺序）的可行时间线。
+const EXAMPLE_MAXGAP_UNBOUNDED_TEXT = [
+  "起床,洗漱,10,30",
+  "出门,开会,40,90",
+  "午休,下班,60,120",
+].join("\n");
+const EXAMPLE_MAXGAP_UNBOUNDED_ORDER = ["起床", "出门", "午休"].join("\n");
+
+// 顺序冲突示例：区间迫使开会比起床晚至少 30 分钟，所选顺序 开会→起床 连 g=0 都不成立。
+const EXAMPLE_MAXGAP_CONFLICT_TEXT = [
+  "起床,洗漱,10,30",
+  "洗漱,开会,20,40",
+].join("\n");
+const EXAMPLE_MAXGAP_CONFLICT_ORDER = ["开会", "起床"].join("\n");
+
 const $ = (id) => document.getElementById(id);
 const resultEl = $("result");
 const redundancyEl = $("redundancy-result");
@@ -142,6 +162,8 @@ const itineraryPlacesEl = $("itinerary-places");
 const itineraryRoutesEl = $("itinerary-routes");
 const itineraryOrderEl = $("itinerary-order");
 const itineraryEl = $("itinerary-result");
+const maxgapOrderEl = $("maxgap-order");
+const maxgapEl = $("maxgap-result");
 
 function esc(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({
@@ -719,6 +741,7 @@ $("btn-clear").addEventListener("click", () => {
   withdrawEl.innerHTML = "";
   aliasEl.innerHTML = "";
   itineraryEl.innerHTML = "";
+  maxgapEl.innerHTML = "";
   refreshLineOptions();
   inputEl.focus();
 });
@@ -732,6 +755,7 @@ inputEl.addEventListener("input", () => {
   withdrawEl.innerHTML = "";    // 文本已变，旧的最少撤回结论作废
   aliasEl.innerHTML = "";       // 区间已变，旧的别名归并结论作废
   itineraryEl.innerHTML = "";   // 区间已变，旧的行程可达性结论作废
+  maxgapEl.innerHTML = "";      // 区间已变，旧的最大统一间隔结论作废
 });
 refreshLineOptions();
 
@@ -1715,4 +1739,230 @@ $("btn-itinerary-clear").addEventListener("click", () => {
 // 地点 / 路段 / 行程顺序任一变化，旧的行程结论立即作废
 [itineraryPlacesEl, itineraryRoutesEl, itineraryOrderEl].forEach((el) => {
   el.addEventListener("input", () => { itineraryEl.innerHTML = ""; });
+});
+
+// ---------- 有序事件最大统一间隔 ----------
+
+// 顺序间隔步骤的标签渲染（矛盾链 tag）：标注相邻对序号与统一间隔下界
+function maxgapStepTagHtml(s) {
+  if (s.kind === "order") {
+    return `<span class="tag order">顺序第 ${s.position} 对 · 间隔 ≥ ${s.bound}</span>`;
+  }
+  return `<span class="tag ${s.kind}">${stepLineRef(s)} · ${esc(s.kind_label)} ${esc(stepBoundText(s))}</span>`;
+}
+
+// 顺序冲突的闭合矛盾链：在通用矛盾链图基础上，顺序间隔环节标注相邻对序号
+function maxgapConflictChainHtml(c) {
+  const parts = [];
+  c.steps.forEach((s, i) => {
+    if (i === 0) parts.push(`<div class="chain-node">${esc(s.from)}</div>`);
+    parts.push(`
+      <div class="chain-edge">
+        ${maxgapStepTagHtml(s)}
+        <span class="rel">${esc(s.relation)}</span>
+        <span class="chain-arrow">→</span>
+      </div>
+      <div class="chain-node">${esc(s.to)}</div>`);
+  });
+  parts.push(`
+    <div class="chain-edge"><span class="muted">闭合回到</span><span class="chain-arrow">⟲</span></div>
+    <div class="chain-node">${esc(c.closes_to)}</div>`);
+  return `<div class="chain">${parts.join("")}</div>`;
+}
+
+// 可行时间线卡片（链式图 + 分钟表；达到 g 或 g=0 的完整时间线共用）
+function maxgapTimelineCardHtml(data, title) {
+  const maxMinute = Math.max(...data.timeline.map((t) => t.minute));
+  const points = data.timeline.map((t) => `
+    <div class="tl-point">
+      <div class="tl-dot"></div>
+      <div class="tl-name">${esc(t.event)}</div>
+      <div class="tl-time">第 ${t.minute} 分钟</div>
+    </div>`).join("");
+  const rows = data.timeline.map((t) =>
+    `<tr><td>${esc(t.event)}</td><td class="num">${t.minute}</td></tr>`).join("");
+  return `
+    <div class="card">
+      <h3>${esc(title)}</h3>
+      <div class="timeline-track">
+        <div class="tl-line"></div>
+        <div class="tl-grid">${points}</div>
+      </div>
+      <table>
+        <thead><tr><th>事件</th><th class="num">分钟（最早事件 = 0）</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <p class="muted">时间跨度：0 ~ ${maxMinute} 分钟。所有事件可整体平移，差值不变。</p>
+    </div>`;
+}
+
+// 相邻所选事件间隔核对表：每对实际间隔与统一间隔要求（g 或 0）
+function maxgapGapsCardHtml(data) {
+  const rows = data.gaps.map((p) => {
+    const ok = p.actual >= data.timeline_g;
+    return `<tr>
+      <td class="num">第 ${p.position} 对</td>
+      <td>${esc(p.from)} → ${esc(p.to)}</td>
+      <td class="num">${p.actual}</td>
+      <td class="num">≥ ${data.timeline_g}</td>
+      <td>${ok ? '<span class="ok-text">满足</span>' : '<span style="color:var(--err)">不满足</span>'}</td>
+    </tr>`;
+  }).join("");
+  return `
+    <div class="card">
+      <h3>相邻所选事件间隔核对</h3>
+      <table>
+        <thead><tr>
+          <th class="num">相邻对</th><th>顺序（先 → 后）</th>
+          <th class="num">本时间线间隔</th><th class="num">统一间隔要求</th><th>结果</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <p class="muted">所选顺序：${data.order.map((n) => esc(n)).join(" → ")}。</p>
+    </div>`;
+}
+
+// 原区间逐条核对表（与联立核对同口径，时间线为加入顺序间隔后的可行解）
+function maxgapDifferencesCardHtml(data) {
+  const rows = data.differences.map((d) => {
+    const fit = d.low <= d.actual && d.actual <= d.high;
+    return `<tr>
+      <td class="num">${d.line}</td>
+      <td>${esc(d.a)} → ${esc(d.b)}</td>
+      <td class="num">[${d.low}, ${d.high}]</td>
+      <td class="num">${d.actual}</td>
+      <td>${fit ? '<span class="ok-text">满足</span>' : '<span style="color:var(--err)">不满足</span>'}</td>
+    </tr>`;
+  }).join("");
+  return `
+    <div class="card">
+      <h3>原区间逐条核对</h3>
+      <table>
+        <thead><tr>
+          <th class="num">行号</th><th>事件对</th><th class="num">要求区间</th>
+          <th class="num">本时间线差值</th><th>结果</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderMaxgapOk(data) {
+  maxgapEl.innerHTML = `
+    <div class="banner ok">
+      <h2>✓ 最大统一间隔 g = ${data.g} 分钟</h2>
+      <p>${esc(data.message)}</p>
+    </div>
+    ${maxgapGapsCardHtml(data)}
+    ${maxgapTimelineCardHtml(data, `达到 g = ${data.g} 分钟的完整可行时间线`)}
+    ${maxgapDifferencesCardHtml(data)}`;
+}
+
+function renderMaxgapUnbounded(data) {
+  maxgapEl.innerHTML = `
+    <div class="banner ok">
+      <h2>✓ 统一间隔无上限</h2>
+      <p>${esc(data.message)}</p>
+    </div>
+    ${maxgapGapsCardHtml(data)}
+    ${maxgapTimelineCardHtml(data, "g = 0 的可行时间线（保持先后顺序）")}
+    ${maxgapDifferencesCardHtml(data)}`;
+}
+
+function renderMaxgapOrderConflict(data) {
+  const c = data.conflict;
+  const detailRows = c.steps.map((s) => {
+    const ref = s.kind === "order" ? `顺序第 ${s.position} 对` : stepLineRef(s);
+    const bound = s.kind === "order" ? String(s.bound) : stepBoundText(s);
+    return `<tr>
+      <td class="num">${ref}</td>
+      <td>${esc(s.from)} → ${esc(s.to)}</td>
+      <td><span class="tag ${s.kind}">${esc(s.kind_label)}</span></td>
+      <td class="num">${esc(bound)}</td>
+      <td>${esc(s.relation)}</td>
+    </tr>`;
+  }).join("");
+
+  maxgapEl.innerHTML = `
+    <div class="banner conflict">
+      <h2>✗ 顺序冲突：连 g=0 都无法保持所选先后</h2>
+      <p>${esc(data.message)}</p>
+      <p style="margin-top:6px">环上界值相加为 <strong>${c.weight_sum} &lt; 0</strong>：
+      请调整所选事件的先后顺序，或先修订与之冲突的区间行。</p>
+    </div>
+    <div class="card">
+      <h3>闭合矛盾链（含顺序间隔环节）</h3>
+      ${maxgapConflictChainHtml(c)}
+    </div>
+    <div class="card">
+      <h3>矛盾依据明细</h3>
+      <table>
+        <thead><tr>
+          <th class="num">来源（区间行 / 顺序对）</th><th>图中方向</th><th>使用的界</th>
+          <th class="num">界值</th><th>含义</th>
+        </tr></thead>
+        <tbody>${detailRows}</tbody>
+      </table>
+      <p class="muted">“顺序间隔”取第 N 对相邻所选事件的统一间隔下界（g=0 时仅要求保持先后）；
+      “上界/下界”取自上方时间差区间文本的原始行号。</p>
+    </div>`;
+}
+
+// 原区间自身矛盾：沿用现有闭合矛盾链渲染（链图 + 涉及原始行明细表）
+function renderMaxgapIntervalConflict(data) {
+  maxgapEl.innerHTML = `
+    <div class="banner err">
+      <h2>✗ 时间差区间自身矛盾</h2>
+      <p>${esc(data.message)}</p>
+    </div>
+    <div id="maxgap-interval-conflict-body"></div>`;
+  renderConflict({ conflict: data.conflict }, $("maxgap-interval-conflict-body"));
+}
+
+async function queryMaxgap() {
+  maxgapEl.innerHTML = `<div class="card muted">联立求最大统一间隔中…</div>`;
+  try {
+    const resp = await fetch("/api/max-gap", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: inputEl.value, order: maxgapOrderEl.value }),
+    });
+    const data = await resp.json();
+    if (data.status === "ok") renderMaxgapOk(data);
+    else if (data.status === "unbounded") renderMaxgapUnbounded(data);
+    else if (data.status === "order_conflict") renderMaxgapOrderConflict(data);
+    else if (data.status === "interval_conflict") renderMaxgapIntervalConflict(data);
+    else renderErrors(data.errors || [{ line: null, message: "未知错误。" }], maxgapEl);
+  } catch (err) {
+    maxgapEl.innerHTML = `
+      <div class="banner err"><h2>请求失败</h2><p>${esc(err.message)}</p></div>`;
+  }
+}
+
+$("btn-maxgap").addEventListener("click", queryMaxgap);
+$("btn-maxgap-example-ok").addEventListener("click", () => {
+  inputEl.value = EXAMPLE_OK;  // 有界示例配合可行示例区间演示（g = 75）
+  maxgapOrderEl.value = EXAMPLE_MAXGAP_OK_ORDER;
+  refreshLineOptions();
+  queryMaxgap();
+});
+$("btn-maxgap-example-unbounded").addEventListener("click", () => {
+  inputEl.value = EXAMPLE_MAXGAP_UNBOUNDED_TEXT;
+  maxgapOrderEl.value = EXAMPLE_MAXGAP_UNBOUNDED_ORDER;
+  refreshLineOptions();
+  queryMaxgap();
+});
+$("btn-maxgap-example-conflict").addEventListener("click", () => {
+  inputEl.value = EXAMPLE_MAXGAP_CONFLICT_TEXT;
+  maxgapOrderEl.value = EXAMPLE_MAXGAP_CONFLICT_ORDER;
+  refreshLineOptions();
+  queryMaxgap();
+});
+$("btn-maxgap-clear").addEventListener("click", () => {
+  maxgapOrderEl.value = "";
+  maxgapEl.innerHTML = "";
+  maxgapOrderEl.focus();
+});
+maxgapOrderEl.addEventListener("input", () => {
+  maxgapEl.innerHTML = "";  // 顺序已变，旧的最大统一间隔结论作废
 });
